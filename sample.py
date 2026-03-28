@@ -31,12 +31,14 @@ if init_from == 'resume':
     with open(model_config_path, "r") as f:
         config_args = json.load(f)
 
+    config_args.pop('iter_num', None)
     config = GPTConfig(**config_args)
     model = GPT(config)
 
     weights = mx.load(model_weights_path)
     model.update(tree_unflatten(list(weights.items())))
     mx.eval(model.parameters())
+    model.eval()  # disable dropout for inference
 
     nparams = sum(x.size for k, x in tree_flatten(model.parameters()))
     print(f"Loaded GPT-2 with {nparams / 1e6:.3f} M parameters")
@@ -61,5 +63,7 @@ x = (mx.array([start_ids], dtype=mx.uint32))
 start = time.time()
 for k in range(num_samples):
     y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-    print(decode(y[0].tolist()))
+    # filter out token IDs beyond tiktoken's vocab (50257) caused by padded vocab_size (50304)
+    tokens = [t for t in y[0].tolist() if t < enc.n_vocab]
+    print(decode(tokens))
 end = time.time()

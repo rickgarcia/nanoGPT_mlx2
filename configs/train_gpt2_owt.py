@@ -12,7 +12,7 @@ lr_decay_iters = 4715
 warmup_iters = 471
 
 # eval stuff
-eval_interval = 250
+eval_interval = 50
 eval_iters = 200
 log_interval = 10
 

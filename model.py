@@ -5,6 +5,8 @@ import mlx.nn as nn
 
 from dataclasses import dataclass
 
+DEBUG_PRINT = False
+
 class LayerNorm(nn.Module):
     r"""Applies layer normalization [1] on the inputs.
 
@@ -107,7 +109,8 @@ class CausalSelfAttention(nn.Module):
         # manual implementation of attention
         att = (query @ key.transpose(0, 1, 3, 2)) * (1.0 / math.sqrt(key.shape[3]))
         mask = mask.reshape(1, 1, T, T)
-        att = mx.where(mask[:,:,:T,:T] == 0, att, float('-1e9'))
+        # mask is tril (1=valid, 0=future). Mask out future positions with large negative.
+        att = mx.where(mask[:,:,:T,:T] == 0, float('-1e9'), att)
         # y = att @ value # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         att = mx.softmax(att.astype(mx.float32), axis=-1).astype(att.dtype)
         att = self.attn_dropout(att)
@@ -250,9 +253,9 @@ class GPT(nn.Module):
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
         Most likely you'll want to make sure to be in model.eval() mode of operation for this.
         """
-        # Initialize the initial sequence context (idx)
-        idx = mx.zeros((1, 1), dtype=mx.int64)
-        
+        # bug: this overwrites the input prompt with zeros, ignoring the start text
+        # idx = mx.zeros((1, 1), dtype=mx.int64)
+
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             # idx_cond = idx if idx[0].shape[1] <= self.config.block_size else idx[:, -self.config.block_size:]
@@ -263,35 +266,40 @@ class GPT(nn.Module):
 
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+            # Force eval so logits are materialized before sampling
+            mx.eval(logits)
+
+            if DEBUG_PRINT and idx.shape[1] < 12:
+                import numpy as np
+                logits_np = np.array(logits[0])
+                top3 = np.argsort(logits_np)[-3:][::-1]
+                print(f"  input last 5 tokens: {idx_cond[0, -5:].tolist()}, "
+                      f"top3 predictions: {top3.tolist()}, "
+                      f"logit values: {logits_np[top3].tolist()}")
 
             # optionally crop the logits to only the top k options
             if top_k is not None:
-                v, _ = custom_topk(logits, min(top_k, logits.shape[-1]))
+                k = min(top_k, logits.shape[-1])
+                sorted_logits = mx.sort(logits, axis=-1)
+                threshold = sorted_logits[:, -(k):(-(k)+1)]
+                # Note: mx.where has a bug with float('-inf') that produces nan,
+                # so we use -1e9 as a large negative value instead
+                logits = mx.where(logits >= threshold, logits, mx.full(logits.shape, -1e9))
+                mx.eval(logits)
 
-                v_shape = v.shape
-
-                # Compute the index of the last element along the second dimension of v
-                last_index = v_shape[1] - 1
-
-                # Use MLX.take to extract the last element along the second dimension of v
-                last_element = mx.take(v, mx.array([last_index]))
-
-                # Expand the last element to match the shape of logits for broadcasting
-                v_last_expanded = mx.expand_dims(last_element, axis=1)
-
-                # Replace values with -1e9 where mask is True
-                mask = logits < v_last_expanded
-                inf_tensor = mx.ones_like(logits) * float('-1e9')
-                logits = (mask * logits) + ((1 - mask) * inf_tensor)
-
-            # apply softmax to convert logits to (normalized) probabilities
-            probs = mx.softmax(logits)
-
-            # Sample from the distribution
-            idx_next = mx.random.categorical(probs, 1)
+            # Sample from the distribution using numpy to avoid MLX random state issues.
+            # Convert logits to probabilities via softmax in numpy, then sample.
+            import numpy as np
+            logits_np = np.array(logits[0])
+            logits_np = logits_np - np.max(logits_np)  # numerical stability
+            probs_np = np.exp(logits_np) / np.sum(np.exp(logits_np))
+            idx_next_np = np.random.choice(len(probs_np), p=probs_np)
+            idx_next = mx.array([idx_next_np])
+            mx.eval(idx_next)
 
             # Append sampled index to the running sequence
             idx = mx.concatenate([idx, mx.expand_dims(idx_next, axis=0)], axis=1)
+            mx.eval(idx)
 
         return idx
 

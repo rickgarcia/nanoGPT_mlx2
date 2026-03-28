@@ -48,6 +48,9 @@ save_interval = 1
 eval_interval = 10
 log_interval = 10
 eval_only = False
+early_stopping_patience = 5 # stop after N evals with no val loss improvement (0 to disable)
+early_stopping_max_gap = 0.0 # stop when train/val loss gap exceeds this ratio (0 to disable)
+init_from = 'resume' # 'scratch' or 'resume'
 out_dir = 'gpt2_openwebtext_pretrain'
 
 # -----------------------------------------------------------------------------
@@ -128,13 +131,15 @@ def main():
 
     # resume from checkpoint if available
     resume_iter = 0
-    if os.path.exists(save_model_path) and os.path.exists(save_model_config_path):
+    if init_from == 'resume' and os.path.exists(save_model_path) and os.path.exists(save_model_config_path):
         print(f"Resuming from checkpoint: {save_model_path}")
         model.load_weights(save_model_path)
         with open(save_model_config_path, "r") as f:
             checkpoint_meta = json.load(f)
         resume_iter = checkpoint_meta.get('iter_num', 0)
         print(f"Resuming from iteration {resume_iter}")
+    else:
+        print("Initializing model from scratch")
 
     mx.eval(model.parameters())
     nparams = sum(
@@ -190,18 +195,77 @@ def main():
         )
         return loss
 
+    def eval_step(x, y):
+        return loss_fn(model, x, y)
+
+    def estimate_loss():
+        """Evaluate train and val loss over eval_iters batches."""
+        model.eval()  # disable dropout during evaluation
+        out = {}
+        for split in ['train', 'val']:
+            losses = []
+            for _ in range(eval_iters):
+                x, y = get_batch(split)
+                loss = eval_step(x, y)
+                mx.eval(loss)
+                losses.append(loss.item())
+            out[split] = sum(losses) / len(losses)
+        model.train()  # re-enable dropout for training
+        return out
+
     # fetch the first batch of samples.
     X, Y = get_batch('train')
-    
+
     state = [model.state, optimizer.state]
 
     tic = time.perf_counter()
     local_iter_num = 0 # number of iterations in the lifetime of this process
     iter_num = resume_iter
     
+    best_val_loss = float('inf')
+    evals_without_improvement = 0
+    best_model_path = os.path.join(out_dir, out_dir + '_best.npz')
+
     while True:
         if iter_num == 0 and eval_only:
             break
+
+        # evaluate train/val loss periodically
+        if iter_num % eval_interval == 0:
+            losses = estimate_loss()
+            print(f"eval iter {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+            log_tboard_dict({'loss': losses['train']}, iter_num, 'eval', '/train')
+            log_tboard_dict({'loss': losses['val']}, iter_num, 'eval', '/val')
+
+            # early stopping: track best val loss and save best model
+            if losses['val'] < best_val_loss:
+                best_val_loss = losses['val']
+                evals_without_improvement = 0
+                # save best model
+                flat_params = tree_flatten(model.parameters())
+                mx.savez(best_model_path, **dict(flat_params))
+                checkpoint_meta = model.config.__dict__.copy()
+                checkpoint_meta['iter_num'] = iter_num
+                with open(save_model_config_path.replace('.json', '_best.json'), "w") as f:
+                    json.dump(checkpoint_meta, f)
+                print(f"  ** new best val loss: {best_val_loss:.4f}, saved to {best_model_path}")
+            else:
+                evals_without_improvement += 1
+                print(f"  val loss did not improve ({evals_without_improvement}/{early_stopping_patience})")
+
+            if early_stopping_patience > 0 and evals_without_improvement >= early_stopping_patience:
+                print(f"Early stopping: val loss has not improved for {early_stopping_patience} evals. "
+                      f"Best val loss: {best_val_loss:.4f}")
+                break
+
+            # early stopping based on train/val gap (overfitting detection)
+            if early_stopping_max_gap > 0 and losses['train'] > 0:
+                gap_ratio = losses['val'] / losses['train']
+                print(f"  train/val gap ratio: {gap_ratio:.2f}x")
+                if gap_ratio > early_stopping_max_gap:
+                    print(f"Early stopping: train/val gap ratio {gap_ratio:.2f}x exceeds "
+                          f"threshold {early_stopping_max_gap:.2f}x. Best val loss: {best_val_loss:.4f}")
+                    break
 
         # lr schedule
         new_lr = update_learning_rate(iter_num)

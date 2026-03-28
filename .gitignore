@@ -1,5 +1,11 @@
 __pycache__/
+*.txt
 *.bin
 *.pyc
+*.swp
 .venv
 *.code-workspace
+gpt2_openwebtext_pretrain*/
+gpt2_shakespeare_pretrain*/
+scratchpad/
+
