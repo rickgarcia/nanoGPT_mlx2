@@ -1,11 +1,16 @@
+.DS_Store
 __pycache__/
 *.txt
 *.bin
 *.pyc
 *.swp
 .venv
+*.pkl
 *.code-workspace
 gpt2_openwebtext_pretrain*/
 gpt2_shakespeare_pretrain*/
+out-shakespeare-char*/
 scratchpad/
-
+karpathy*
+wandb/
+.envrc

@@ -1,5 +1,5 @@
 import os
-import argparse
+import pickle
 import tiktoken
 import time
 import json
@@ -10,20 +10,20 @@ from mlx.utils import tree_unflatten, tree_flatten
 from model import GPT, GPTConfig
 
 
-# -----------------------------------------------------------------------------
-init_from = 'gpt2' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
-out_dir = 'out' # ignored if init_from is not 'resume'
-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 10 # number of samples to draw
-max_new_tokens = 256 # number of tokens generated in each sample
-temperature = 0.8 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 200 # retain only the top_k most likely tokens, clamp others to have 0 probability
+init_from = 'resume'   # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
+out_dir = 'out'        # ignored if init_from is not 'resume'
+start = "\n"           # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+num_samples = 10       # number of samples to draw
+max_new_tokens = 256   # number of tokens generated in each sample
+temperature = 0.8      # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 200            # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
-exec(open('configurator.py').read()) # overrides from command line or config file
-# -----------------------------------------------------------------------------
 
-model_weights_path = os.path.join(out_dir, out_dir + '.npz')
-model_config_path = os.path.join(out_dir, out_dir + '.json')
+# overrides from command line or config file
+exec(open('configurator.py').read()) 
+
+model_weights_path = os.path.join(out_dir, out_dir + '_best.npz')
+model_config_path = os.path.join(out_dir, out_dir + '_best.json')
 
 # model
 if init_from == 'resume':
@@ -47,10 +47,30 @@ elif init_from.startswith('gpt2'):
     # TODO
     raise NotImplementedError("This feature/functionality is not yet implemented.")
 
-# ok let's assume gpt-2 encodings by default
-enc = tiktoken.get_encoding("gpt2")
-encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-decode = lambda l: enc.decode(l)
+# detect character-level vs BPE encoding
+# search data directories for a meta.pkl with matching vocab_size
+meta_path = None
+for d in os.listdir('data'):
+    candidate = os.path.join('data', d, 'meta.pkl')
+    if os.path.exists(candidate):
+        with open(candidate, 'rb') as f:
+            meta = pickle.load(f)
+        if meta['vocab_size'] == config.vocab_size:
+            meta_path = candidate
+            break
+
+if meta_path:
+    stoi, itos = meta['stoi'], meta['itos']
+    vocab_size = meta['vocab_size']
+    encode = lambda s: [stoi[c] for c in s]
+    decode = lambda l: ''.join([itos[i] for i in l if i < vocab_size])
+    print(f"Using character-level encoding (vocab_size={vocab_size})")
+else:
+    enc = tiktoken.get_encoding("gpt2")
+    vocab_size = enc.n_vocab
+    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+    decode = lambda l: enc.decode([t for t in l if t < vocab_size])
+    print(f"Using tiktoken GPT-2 BPE encoding (vocab_size={vocab_size})")
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
@@ -63,7 +83,6 @@ x = (mx.array([start_ids], dtype=mx.uint32))
 start = time.time()
 for k in range(num_samples):
     y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-    # filter out token IDs beyond tiktoken's vocab (50257) caused by padded vocab_size (50304)
-    tokens = [t for t in y[0].tolist() if t < enc.n_vocab]
+    tokens = [t for t in y[0].tolist() if t < vocab_size]
     print(decode(tokens))
 end = time.time()

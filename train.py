@@ -12,9 +12,10 @@ import mlx.nn as nn
 import mlx.optimizers as optim
 from mlx.utils import tree_flatten, tree_map
 
+import wandb
+
 from model import GPTConfig, GPT
 from optimizer import AdamW
-from tboard_utils import init_tensorboard, get_tensorboard
 
 
 # model
@@ -69,10 +70,10 @@ val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r
 save_model_path = os.path.join(out_dir, out_dir + '.npz')
 save_model_config_path = os.path.join(out_dir, out_dir + '.json')
 
-# initialize tboard logging:
 os.makedirs(out_dir, exist_ok=True)
-tboard_dir = os.path.join(out_dir, "tboard_log")
-init_tensorboard(tboard_dir)
+
+# initialize wandb logging
+wandb.init(project=out_dir, config=config)
 
 
 def get_batch(split):
@@ -107,10 +108,8 @@ def update_learning_rate(it):
     return new_lr
     
 
-def log_tboard_dict(log_dict, itr, pre, post=''):
-    writer = get_tensorboard()
-    for k, v in log_dict.items():
-        writer.add_scalar(f'{pre}/{k}{post}', v, itr)
+def log_wandb(log_dict, itr):
+    wandb.log(log_dict, step=itr)
 
 
 def main():
@@ -203,13 +202,12 @@ def main():
         model.eval()  # disable dropout during evaluation
         out = {}
         for split in ['train', 'val']:
-            losses = []
-            for _ in range(eval_iters):
+            losses = mx.zeros(eval_iters)
+            for i in range(eval_iters):
                 x, y = get_batch(split)
-                loss = eval_step(x, y)
-                mx.eval(loss)
-                losses.append(loss.item())
-            out[split] = sum(losses) / len(losses)
+                losses[i] = eval_step(x, y)
+            mx.eval(losses)
+            out[split] = losses.mean().item()
         model.train()  # re-enable dropout for training
         return out
 
@@ -234,8 +232,7 @@ def main():
         if iter_num % eval_interval == 0:
             losses = estimate_loss()
             print(f"eval iter {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-            log_tboard_dict({'loss': losses['train']}, iter_num, 'eval', '/train')
-            log_tboard_dict({'loss': losses['val']}, iter_num, 'eval', '/val')
+            log_wandb({'eval/train_loss': losses['train'], 'eval/val_loss': losses['val']}, iter_num)
 
             # early stopping: track best val loss and save best model
             if losses['val'] < best_val_loss:
@@ -281,11 +278,7 @@ def main():
         mx.eval(state)
 
         if iter_num % log_interval == 0:
-            log_train_dict = {
-                'loss': loss.item(),
-                'lr': new_lr
-            }
-            log_tboard_dict(log_train_dict, iter_num, 'train')
+            log_wandb({'train/loss': loss.item(), 'train/lr': new_lr}, iter_num)
         
         if iter_num % save_interval == 0:
             # save model weights

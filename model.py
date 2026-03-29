@@ -334,39 +334,3 @@ class GPT(nn.Module):
         x, _ = self._forward_transformer(x, pos, mask=mask)
         return self.out_proj(x)
         
-
-def custom_topk(input, k):
-    """
-    Implementation of top-k function in MLX.
-        :param input: The input tensor.
-        :param k: The number of elements to keep.
-        :return: A tuple containing the top-k values and their indices.
-    """
-    # Flatten the input tensor along the last dimension
-    flat_input = mx.reshape(input, (-1,))
-
-    # Sort the flattened input tensor in descending order
-    sorted_indices = mx.argsort(flat_input)
-    sorted_indices = mx.take(sorted_indices, mx.arange(sorted_indices.size - 1, -1, -1))
-
-    # Slice the sorted indices to get the top-k indices
-    topk_indices = custom_slice(sorted_indices, start=0, end=k)
-    
-    # Gather the top-k values using the top-k indices
-    topk_values = mx.take(flat_input, topk_indices)
-    
-    return mx.expand_dims(topk_values, axis=0), mx.expand_dims(topk_indices,  axis=0)
-
-
-def custom_slice(indices, start, end):
-    """
-    Implementation of slice operation for indices.
-        :param indices: The sorted indices tensor.
-        :param start: The starting index for slicing.
-        :param end: The ending index for slicing.
-        :return: The sliced indices tensor.
-    """
-    # Take the range of indices from start to end
-    sliced_indices = mx.take(indices, mx.arange(start, end))
-    return sliced_indices
-    
