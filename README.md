@@ -143,5 +143,6 @@ python sample.py --init_from=resume --out_dir=converted_model
 
 ## Acknowledgements
 [Andrej Karpathy](https://github.com/karpathy) for nanoGPT - https://github.com/karpathy/nanogpt
+
 [Vithu Thangarasa](https://github.com/vithursant) for the initial nanoGPT_mlx work - https://github.com/vithursant/nanoGPT_mlx
 
