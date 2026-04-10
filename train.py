@@ -128,15 +128,27 @@ def main():
     weights = tree_map(lambda p: p.astype(getattr(mx, d_type)), model.parameters())
     model.update(weights)
 
-    # resume from checkpoint if available
+    # resume from checkpoint if available, preferring best checkpoint over regular
     resume_iter = 0
-    if init_from == 'resume' and os.path.exists(save_model_path) and os.path.exists(save_model_config_path):
-        print(f"Resuming from checkpoint: {save_model_path}")
-        model.load_weights(save_model_path)
-        with open(save_model_config_path, "r") as f:
-            checkpoint_meta = json.load(f)
-        resume_iter = checkpoint_meta.get('iter_num', 0)
-        print(f"Resuming from iteration {resume_iter}")
+    best_model_path = os.path.join(out_dir, out_dir + '_best.npz')
+    best_model_config_path = save_model_config_path.replace('.json', '_best.json')
+    if init_from == 'resume':
+        if os.path.exists(best_model_path) and os.path.exists(best_model_config_path):
+            print(f"Resuming from best checkpoint: {best_model_path}")
+            model.load_weights(best_model_path)
+            with open(best_model_config_path, "r") as f:
+                checkpoint_meta = json.load(f)
+            resume_iter = checkpoint_meta.get('iter_num', 0)
+            print(f"Resuming from iteration {resume_iter}")
+        elif os.path.exists(save_model_path) and os.path.exists(save_model_config_path):
+            print(f"Resuming from checkpoint: {save_model_path}")
+            model.load_weights(save_model_path)
+            with open(save_model_config_path, "r") as f:
+                checkpoint_meta = json.load(f)
+            resume_iter = checkpoint_meta.get('iter_num', 0)
+            print(f"Resuming from iteration {resume_iter}")
+        else:
+            print("No checkpoint found, initializing from scratch")
     else:
         print("Initializing model from scratch")
 
@@ -168,7 +180,7 @@ def main():
                     lambda x: mx.zeros_like(x), model.parameters()
                 )
         accumulated_loss = 0.0
-        for micro_step in range(gradient_accumulation_steps):
+        for _ in range(gradient_accumulation_steps):
             loss, grads = loss_and_grad_fn(model, X, Y)
 
             accumulated_grads = tree_map(
@@ -223,6 +235,8 @@ def main():
     best_val_loss = float('inf')
     evals_without_improvement = 0
     best_model_path = os.path.join(out_dir, out_dir + '_best.npz')
+    last_saved_train_loss = float('inf')
+    last_saved_iter = -1
 
     while True:
         if iter_num == 0 and eval_only:
@@ -280,15 +294,19 @@ def main():
         if iter_num % log_interval == 0:
             log_wandb({'train/loss': loss.item(), 'train/lr': new_lr}, iter_num)
         
-        if iter_num % save_interval == 0:
-            # save model weights
+        # save if loss dropped >10% from last save, or every save_interval iters (but not iter 0)
+        loss_improved = loss.item() < last_saved_train_loss * 0.9
+        interval_reached = iter_num > 0 and (iter_num - last_saved_iter) >= save_interval
+        if local_iter_num > 0 and (loss_improved or interval_reached):
             flat_params = tree_flatten(model.parameters())
             mx.savez(save_model_path, **dict(flat_params))
-            # save model config and training state
             checkpoint_meta = model.config.__dict__.copy()
             checkpoint_meta['iter_num'] = iter_num
             with open(save_model_config_path, "w") as f:
                 json.dump(checkpoint_meta, f)
+            last_saved_train_loss = loss.item()
+            last_saved_iter = iter_num
+            print(f"  checkpoint saved at iter {iter_num} (loss={loss.item():.4f})")
 
         iter_num += 1
         local_iter_num += 1

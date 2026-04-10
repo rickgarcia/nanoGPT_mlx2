@@ -12,9 +12,11 @@ lr_decay_iters = 4715
 warmup_iters = 471
 
 # eval stuff
-eval_interval = 50
-eval_iters = 200
+save_interval = 500
+eval_interval = 100
+eval_iters = 100
 log_interval = 10
+early_stopping_patience = 0  # disable for long overnight runs
 
 # weight decay
 weight_decay = 1e-1
