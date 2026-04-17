@@ -233,10 +233,34 @@ def main():
     iter_num = resume_iter
     
     best_val_loss = float('inf')
+    best_train_loss = float('inf')
     evals_without_improvement = 0
     best_model_path = os.path.join(out_dir, out_dir + '_best.npz')
     last_saved_train_loss = float('inf')
     last_saved_iter = -1
+
+    def run_eval(reason=''):
+        nonlocal best_val_loss, evals_without_improvement
+        losses = estimate_loss()
+        label = f"eval iter {iter_num}" + (f" ({reason})" if reason else '')
+        print(f"{label}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
+        log_wandb({'eval/train_loss': losses['train'], 'eval/val_loss': losses['val']}, iter_num)
+
+        if losses['val'] < best_val_loss:
+            best_val_loss = losses['val']
+            evals_without_improvement = 0
+            flat_params = tree_flatten(model.parameters())
+            mx.savez(best_model_path, **dict(flat_params))
+            checkpoint_meta = model.config.__dict__.copy()
+            checkpoint_meta['iter_num'] = iter_num
+            with open(save_model_config_path.replace('.json', '_best.json'), "w") as f:
+                json.dump(checkpoint_meta, f)
+            print(f"  ** new best val loss: {best_val_loss:.4f}, saved to {best_model_path}")
+        else:
+            evals_without_improvement += 1
+            print(f"  val loss did not improve ({evals_without_improvement}/{early_stopping_patience})")
+
+        return losses
 
     while True:
         if iter_num == 0 and eval_only:
@@ -244,25 +268,7 @@ def main():
 
         # evaluate train/val loss periodically
         if iter_num % eval_interval == 0:
-            losses = estimate_loss()
-            print(f"eval iter {iter_num}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
-            log_wandb({'eval/train_loss': losses['train'], 'eval/val_loss': losses['val']}, iter_num)
-
-            # early stopping: track best val loss and save best model
-            if losses['val'] < best_val_loss:
-                best_val_loss = losses['val']
-                evals_without_improvement = 0
-                # save best model
-                flat_params = tree_flatten(model.parameters())
-                mx.savez(best_model_path, **dict(flat_params))
-                checkpoint_meta = model.config.__dict__.copy()
-                checkpoint_meta['iter_num'] = iter_num
-                with open(save_model_config_path.replace('.json', '_best.json'), "w") as f:
-                    json.dump(checkpoint_meta, f)
-                print(f"  ** new best val loss: {best_val_loss:.4f}, saved to {best_model_path}")
-            else:
-                evals_without_improvement += 1
-                print(f"  val loss did not improve ({evals_without_improvement}/{early_stopping_patience})")
+            losses = run_eval()
 
             if early_stopping_patience > 0 and evals_without_improvement >= early_stopping_patience:
                 print(f"Early stopping: val loss has not improved for {early_stopping_patience} evals. "
@@ -293,7 +299,14 @@ def main():
 
         if iter_num % log_interval == 0:
             log_wandb({'train/loss': loss.item(), 'train/lr': new_lr}, iter_num)
-        
+
+        # run eval on new all-time training loss low (skip if eval already ran this iter)
+        if local_iter_num > 0 and loss.item() < best_train_loss and iter_num % eval_interval != 0:
+            best_train_loss = loss.item()
+            run_eval('new train loss low')
+        elif local_iter_num > 0 and loss.item() < best_train_loss:
+            best_train_loss = loss.item()
+
         # save if loss dropped >10% from last save, or every save_interval iters (but not iter 0)
         loss_improved = loss.item() < last_saved_train_loss * 0.9
         interval_reached = iter_num > 0 and (iter_num - last_saved_iter) >= save_interval
